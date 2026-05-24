@@ -5,11 +5,15 @@ author: hatcyk
 email: 133507370+hatcyk@users.noreply.github.com
 """
 
+import csv
 import sys
+import time
 from urllib.parse import urlparse, parse_qs, urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+HLAVICKY = {"User-Agent": "Mozilla/5.0 (volby-scraper; projekt_3.py)"}
 
 
 def parse_args(argv: list[str]) -> tuple[str, str]:
@@ -45,12 +49,19 @@ def parse_args(argv: list[str]) -> tuple[str, str]:
     return url, output
 
 
-def stahni_stranku(url: str) -> BeautifulSoup:
-    """Stahne HTML danou URL a vrati objekt BeautifulSoup."""
-    odpoved = requests.get(url, timeout=30)
-    odpoved.raise_for_status()
-    odpoved.encoding = odpoved.apparent_encoding
-    return BeautifulSoup(odpoved.text, "html.parser")
+def stahni_stranku(url: str, pokusy: int = 3) -> BeautifulSoup:
+    """Stahne HTML danou URL a vrati objekt BeautifulSoup. Pri chybe to zkusi znovu."""
+    posledni_chyba: Exception | None = None
+    for pokus in range(1, pokusy + 1):
+        try:
+            odpoved = requests.get(url, headers=HLAVICKY, timeout=30)
+            odpoved.raise_for_status()
+            odpoved.encoding = odpoved.apparent_encoding
+            return BeautifulSoup(odpoved.text, "html.parser")
+        except requests.RequestException as chyba:
+            posledni_chyba = chyba
+            time.sleep(pokus)
+    sys.exit(f"CHYBA: nepodarilo se stahnout {url}: {posledni_chyba}")
 
 
 def ziskej_seznam_obci(url: str) -> list[tuple[str, str, str]]:
@@ -80,14 +91,78 @@ def ziskej_seznam_obci(url: str) -> list[tuple[str, str, str]]:
     return obce
 
 
+def _ocisti_cislo(text: str) -> str:
+    """Z volby.cz textu jako '1\xa0234' udela '1234'."""
+    return text.replace("\xa0", "").replace(" ", "").strip()
+
+
+def ziskej_vysledky_obce(url: str) -> dict[str, object]:
+    """Z detailu obce vrati souhrn (volici, obalky, platne hlasy + slovnik hlasu po stranach)."""
+    soup = stahni_stranku(url)
+    tabulky = soup.find_all("table")
+    if not tabulky:
+        sys.exit(f"CHYBA: na strance {url} nejsou ocekavane tabulky.")
+
+    # Souhrnna tabulka - 3. radek (index 2) je radek s hodnotami
+    souhrn = tabulky[0].find_all("tr")[2].find_all("td")
+    volici = _ocisti_cislo(souhrn[3].get_text())
+    obalky = _ocisti_cislo(souhrn[4].get_text())
+    platne = _ocisti_cislo(souhrn[7].get_text())
+
+    # Tabulky stran (vsechny dalsi)
+    strany: dict[str, str] = {}
+    for tabulka in tabulky[1:]:
+        radky = tabulka.find_all("tr")
+        for radek in radky[2:]:
+            bunky = radek.find_all("td")
+            if len(bunky) < 3:
+                continue
+            cislo = bunky[0].get_text(strip=True)
+            nazev = bunky[1].get_text(strip=True)
+            hlasy = _ocisti_cislo(bunky[2].get_text())
+            if cislo == "-" or not nazev:
+                continue
+            strany[nazev] = hlasy
+
+    return {
+        "volici": volici,
+        "obalky": obalky,
+        "platne": platne,
+        "strany": strany,
+    }
+
+
 def main() -> None:
     url, output = parse_args(sys.argv)
     print(f"STAHUJI DATA Z URL: {url}")
     obce = ziskej_seznam_obci(url)
     print(f"NALEZENO OBCI: {len(obce)}")
-    for kod, nazev, _ in obce[:3]:
-        print(f"  {kod} - {nazev}")
+
+    vysledky: list[dict[str, object]] = []
+    nazvy_stran: list[str] = []
+
+    for kod, nazev, url_detailu in obce:
+        print(f"  zpracovavam {kod} {nazev}")
+        data = ziskej_vysledky_obce(url_detailu)
+        if not nazvy_stran:
+            nazvy_stran = list(data["strany"].keys())
+        vysledky.append({
+            "kod": kod,
+            "nazev": nazev,
+            **data,
+        })
+
     print(f"UKLADAM DATA DO SOUBORU: {output}")
+    with open(output, "w", encoding="utf-8", newline="") as f:
+        zapisovac = csv.writer(f)
+        zapisovac.writerow(
+            ["code", "location", "registered", "envelopes", "valid", *nazvy_stran]
+        )
+        for r in vysledky:
+            zapisovac.writerow([
+                r["kod"], r["nazev"], r["volici"], r["obalky"], r["platne"],
+                *[r["strany"].get(s, "0") for s in nazvy_stran],
+            ])
     print("DOKONCUJI: projekt_3.py")
 
 
