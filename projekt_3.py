@@ -153,7 +153,8 @@ def main() -> None:
         })
 
     print(f"UKLADAM DATA DO SOUBORU: {output}")
-    with open(output, "w", encoding="utf-8", newline="") as f:
+    # utf-8-sig => Excel na Macu/Windows spravne pozna Ceske znaky
+    with open(output, "w", encoding="utf-8-sig", newline="") as f:
         zapisovac = csv.writer(f)
         zapisovac.writerow(
             ["code", "location", "registered", "envelopes", "valid", *nazvy_stran]
