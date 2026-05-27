@@ -8,12 +8,18 @@ email: 133507370+hatcyk@users.noreply.github.com
 import csv
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 HLAVICKY = {"User-Agent": "Mozilla/5.0 (volby-scraper; projekt_3.py)"}
+POCET_VLAKEN = 10
+
+# sdilena session - opakovane vyuziva TCP spojeni, vyrazne rychlejsi
+SESSION = requests.Session()
+SESSION.headers.update(HLAVICKY)
 
 
 def parse_args(argv: list[str]) -> tuple[str, str]:
@@ -54,7 +60,7 @@ def stahni_stranku(url: str, pokusy: int = 3) -> BeautifulSoup:
     posledni_chyba: Exception | None = None
     for pokus in range(1, pokusy + 1):
         try:
-            odpoved = requests.get(url, headers=HLAVICKY, timeout=30)
+            odpoved = SESSION.get(url, timeout=30)
             odpoved.raise_for_status()
             odpoved.encoding = odpoved.apparent_encoding
             return BeautifulSoup(odpoved.text, "html.parser")
@@ -138,19 +144,25 @@ def main() -> None:
     obce = ziskej_seznam_obci(url)
     print(f"NALEZENO OBCI: {len(obce)}")
 
-    vysledky: list[dict[str, object]] = []
+    # Paralelni stahovani detailu obci - vyrazne rychlejsi nez sekvencne
+    vysledky_dict: dict[str, dict[str, object]] = {}
     nazvy_stran: list[str] = []
 
-    for kod, nazev, url_detailu in obce:
-        print(f"  zpracovavam {kod} {nazev}")
-        data = ziskej_vysledky_obce(url_detailu)
-        if not nazvy_stran:
-            nazvy_stran = list(data["strany"].keys())
-        vysledky.append({
-            "kod": kod,
-            "nazev": nazev,
-            **data,
-        })
+    with ThreadPoolExecutor(max_workers=POCET_VLAKEN) as executor:
+        ulohy = {
+            executor.submit(ziskej_vysledky_obce, url_detailu): (kod, nazev)
+            for kod, nazev, url_detailu in obce
+        }
+        for budouci in as_completed(ulohy):
+            kod, nazev = ulohy[budouci]
+            data = budouci.result()
+            if not nazvy_stran:
+                nazvy_stran = list(data["strany"].keys())
+            vysledky_dict[kod] = {"kod": kod, "nazev": nazev, **data}
+            print(f"  hotovo {kod} {nazev}")
+
+    # Zachovat puvodni poradi obci podle prehledove stranky
+    vysledky = [vysledky_dict[kod] for kod, _, _ in obce]
 
     print(f"UKLADAM DATA DO SOUBORU: {output}")
     # utf-8-sig => Excel na Macu/Windows spravne pozna Ceske znaky
